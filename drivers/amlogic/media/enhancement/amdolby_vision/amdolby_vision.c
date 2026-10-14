@@ -82,6 +82,11 @@ static bool xbmc_dv_l11_vsif = true;
 static u32 dv_new_blob_max_hz = 50;
 static bool xbmc_dv_source_native;
 static bool xbmc_dv_new_sdr_route;
+/* The newer library does no display management for SDR output in video
+ * priority (identity core1 tone curve, everything above 100 nits clips);
+ * in graphics priority it tone-maps to the metadata like the 5.15 driver,
+ * which runs it in graphics priority. */
+static bool xbmc_dv_new_sdr_gpr = true;
 static uint dv_new_backend_available;
 static uint amdv_multi_dv_mode;
 static bool dv_pending_new;
@@ -111,6 +116,8 @@ module_param(dv_new_blob_max_hz, uint, 0664);
 module_param(xbmc_dv_source_native, bool, 0664);
 module_param(xbmc_dv_new_sdr_route, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_route, "Experimental: also permit the newer backend for native DV to SDR output");
+module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
 module_param(amdv_multi_dv_mode, uint, 0444);
 MODULE_PARM_DESC(amdv_multi_dv_mode, "Applied backend: 0 legacy, 1 newer native DV");
@@ -6923,6 +6930,9 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 		pri_mode = G_PRIORITY;
 	else
 		pri_mode = V_PRIORITY;
+	if (use_new && dst_format == FORMAT_SDR && READ_ONCE(xbmc_dv_new_sdr_gpr) &&
+	    !(dolby_vision_flags & FLAG_CERTIFICAION))
+		pri_mode = G_PRIORITY;
 
 	if (dst_format == FORMAT_DOVI) {
 		if ((dolby_vision_flags & FLAG_FORCE_DOVI_LL) ||
