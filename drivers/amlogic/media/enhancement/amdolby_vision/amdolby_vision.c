@@ -7128,7 +7128,11 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 		 * HDR10 stream - so SET the assumed peak deterministically;
 		 * best-effort, the library may assume the nominal 1000-nit
 		 * HLG peak and ignore it. */
-		if (xbmc_dv_sdr_src_max_nits && (dst_format == FORMAT_SDR) &&
+		/* Legacy only: the newer library already tone-maps to the real
+		 * statics (= the 5.15 curve); the cap pushes its curve past
+		 * SDR white and clips the highlights. DV skips it the same way
+		 * (the boost edits md_buf, never dv_new_md). */
+		if (!use_new && xbmc_dv_sdr_src_max_nits && (dst_format == FORMAT_SDR) &&
 		    ((src_format == FORMAT_HDR10) || (src_format == FORMAT_HLG))) {
 			u32 nits = sdr_src_boost_nits(src_format == FORMAT_HLG ?
 				0 : hdr10_param_use.max_content_light_level);
