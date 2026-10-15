@@ -25,6 +25,12 @@ static unsigned int dv_shim_debug;
 module_param(dv_shim_debug, uint, 0664);
 MODULE_PARM_DESC(dv_shim_debug, "bit0 reg, bit1 control_path, bit2 output, bit3 CFI checks");
 
+/* Video bit depth declared for non-DV (VS10) input: 0 = the decoder's depth,
+ * 8..12 = forced. DV always declares the composer's 12 bits. */
+static unsigned int dv_shim_vs10_bd;
+module_param(dv_shim_vs10_bd, uint, 0664);
+MODULE_PARM_DESC(dv_shim_vs10_bd, "VS10 input bit depth: 0 decoder, 8..12 forced");
+
 #define DVSHIM_REG BIT(0)
 #define DVSHIM_CP BIT(1)
 #define DVSHIM_OUT BIT(2)
@@ -65,7 +71,7 @@ static char mp_comp[DV5_COMP_CAPACITY];
 
 struct dv5_last_cp {
 	enum signal_format_enum in, out;
-	u32 use_ll, ll_rgb, width, height;
+	u32 use_ll, ll_rgb, width, height, bd;
 	int priority;
 };
 static struct dv5_last_cp last_cp;
@@ -160,6 +166,7 @@ static void cp_forget(void)
 	last_cp.priority = -1;
 	last_cp.width = 0;
 	last_cp.height = 0;
+	last_cp.bd = 0;
 }
 
 static bool blob_get(void) { return blob_funcs && blob_owner && try_module_get(blob_owner); }
@@ -279,6 +286,12 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	/* DV leaves the composer at 12 bits; VS10 input is the decoder's depth. */
 	vid->set_bit_depth = (in_format == FORMAT_DOVI || in_format == FORMAT_DOVI_LL) ?
 			     DV5_VIDEO_BIT_DEPTH : set_bit_depth;
+	if (in_format != FORMAT_DOVI && in_format != FORMAT_DOVI_LL) {
+		unsigned int bd = READ_ONCE(dv_shim_vs10_bd);
+
+		if (bd >= 8 && bd <= 12)
+			vid->set_bit_depth = bd;
+	}
 	vid->set_chroma_format = set_chroma_format;
 	vid->set_yuv_range = set_yuv_range;
 	vid->color_format = DV5_CP_YUV;
@@ -313,7 +326,7 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	need_reset = in_format != last_cp.in || out_format != last_cp.out ||
 		     m->use_ll_flag != last_cp.use_ll || m->ll_rgb_desired != last_cp.ll_rgb ||
 		     (int)set_priority != last_cp.priority || vid->video_width != last_cp.width ||
-		     vid->video_height != last_cp.height;
+		     vid->video_height != last_cp.height || vid->set_bit_depth != last_cp.bd;
 	if (need_reset)
 		cp_send_reset();
 	last_cp.in = in_format;
@@ -323,6 +336,7 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	last_cp.priority = set_priority;
 	last_cp.width = vid->video_width;
 	last_cp.height = vid->video_height;
+	last_cp.bd = vid->set_bit_depth;
 
 	flag = blob_funcs->multi_control_path(m);
 	blob_put();
@@ -369,6 +383,19 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 		for (i = 0; i < 26 && n < 250; i++)
 			n += scnprintf(b + n, sizeof(b) - n, "%08x ", d3[i]);
 		dvshim_dbg(DVSHIM_OUT, "dm3= %s\n", b);
+		for (n = 0, i = 0; i < 27 && n < 250; i++)
+			n += scnprintf(b + n, sizeof(b) - n, "%08x ", d1[i]);
+		dvshim_dbg(DVSHIM_OUT, "dm1= %s\n", b);
+		{
+			u32 *c = (u32 *)&output->comp_reg;
+			u32 sum = 0;
+
+			for (i = 0; i < 173; i++)
+				sum = sum * 31 + c[i];
+			for (n = 0, i = 0; i < 24 && n < 250; i++)
+				n += scnprintf(b + n, sizeof(b) - n, "%08x ", c[i]);
+			dvshim_dbg(DVSHIM_OUT, "comp sum=%08x bd=%d %s\n", sum, vid->set_bit_depth, b);
+		}
 	}
 
 	if (flag < 0)
