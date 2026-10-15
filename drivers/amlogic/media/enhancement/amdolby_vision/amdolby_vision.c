@@ -82,6 +82,10 @@ static bool xbmc_dv_l11_vsif = true;
 static u32 dv_new_blob_max_hz = 50;
 static bool xbmc_dv_source_native;
 static bool xbmc_dv_new_sdr_route;
+/* VS10 SDR for every source: SDR, HDR10, HLG, HDR10+ and converted DV
+ * (generated RPU) also go to the newer library when the output is SDR,
+ * as the 5.15 driver does with the same library. */
+static bool xbmc_dv_new_vs10_route;
 /* The newer library does no display management for SDR output in video
  * priority (identity core1 tone curve, everything above 100 nits clips);
  * in graphics priority it tone-maps to the metadata like the 5.15 driver,
@@ -116,6 +120,8 @@ module_param(dv_new_blob_max_hz, uint, 0664);
 module_param(xbmc_dv_source_native, bool, 0664);
 module_param(xbmc_dv_new_sdr_route, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_route, "Experimental: also permit the newer backend for native DV to SDR output");
+module_param(xbmc_dv_new_vs10_route, bool, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_vs10_route, "Experimental: newer backend for every source to SDR output (needs xbmc_dv_new_sdr_route)");
 module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
@@ -6633,7 +6639,7 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 
 	if (drop_flag) {
 		if (dv_new_route(src_format, dv_mode_dst_format(), vinfo))
-			dv_prepare_new(&req, true, false);
+			dv_prepare_new(&req, true, false, src_format);
 		pr_dolby_dbg("drop frame_count %d\n", frame_count);
 		return 1;
 	}
@@ -6815,7 +6821,7 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 	}
 
 	use_new = dv_new_route(src_format, dst_format, vinfo);
-	if (use_new && !dv_prepare_new(&req, false, toggle_mode == 2)) {
+	if (use_new && !dv_prepare_new(&req, false, toggle_mode == 2, src_format)) {
 		dv_new_runtime_failed = true;
 		dv_retire_new();
 		use_new = false;
