@@ -25,11 +25,11 @@ static unsigned int dv_shim_debug;
 module_param(dv_shim_debug, uint, 0664);
 MODULE_PARM_DESC(dv_shim_debug, "bit0 reg, bit1 control_path, bit2 output, bit3 CFI checks");
 
-/* Video bit depth declared for non-DV (VS10) input: 0 = the decoder's depth,
+/* Video bit depth declared for non-DV (VS10) input: 0 = the composer 12 bits,
  * 8..12 = forced. DV always declares the composer's 12 bits. */
 static unsigned int dv_shim_vs10_bd;
 module_param(dv_shim_vs10_bd, uint, 0664);
-MODULE_PARM_DESC(dv_shim_vs10_bd, "VS10 input bit depth: 0 decoder, 8..12 forced");
+MODULE_PARM_DESC(dv_shim_vs10_bd, "VS10 input bit depth: 0 composer (12), 8..12 forced");
 
 #define DVSHIM_REG BIT(0)
 #define DVSHIM_CP BIT(1)
@@ -283,9 +283,10 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	vid->el_halfsize_flag = output->el_halfsize_flag;
 	vid->video_width = output->video_width >> 16;
 	vid->video_height = output->video_height >> 16;
-	/* DV leaves the composer at 12 bits; VS10 input is the decoder's depth. */
-	vid->set_bit_depth = (in_format == FORMAT_DOVI || in_format == FORMAT_DOVI_LL) ?
-			     DV5_VIDEO_BIT_DEPTH : set_bit_depth;
+	/* Core1 always gets the composer's 12 bits, also for non-DV input:
+	 * declaring the decoder's 10 bits shifts the library's input range
+	 * (HDR10 white came out grey). The knob only forces another value. */
+	vid->set_bit_depth = DV5_VIDEO_BIT_DEPTH;
 	if (in_format != FORMAT_DOVI && in_format != FORMAT_DOVI_LL) {
 		unsigned int bd = READ_ONCE(dv_shim_vs10_bd);
 
