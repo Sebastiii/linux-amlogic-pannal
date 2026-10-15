@@ -86,6 +86,11 @@ static bool xbmc_dv_new_sdr_route;
  * (generated RPU) also go to the newer library when the output is SDR,
  * as the 5.15 driver does with the same library. */
 static bool xbmc_dv_new_vs10_route;
+/* VS10 HDR10->SDR on the newer library: take the content MaxCLL as the
+ * source peak when it is valid and below the mastering peak, so Dolby DM
+ * tone-maps for the real content range instead of the 1000/4000-nit
+ * mastering display (the HDR10+ -> DV path gets this from its L1). */
+static bool xbmc_dv_new_hdr10_cll_peak;
 /* The newer library does no display management for SDR output in video
  * priority (identity core1 tone curve, everything above 100 nits clips);
  * in graphics priority it tone-maps to the metadata like the 5.15 driver,
@@ -122,6 +127,8 @@ module_param(xbmc_dv_new_sdr_route, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_route, "Experimental: also permit the newer backend for native DV to SDR output");
 module_param(xbmc_dv_new_vs10_route, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_vs10_route, "Experimental: newer backend for every source to SDR output (needs xbmc_dv_new_sdr_route)");
+module_param(xbmc_dv_new_hdr10_cll_peak, bool, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_hdr10_cll_peak, "Newer backend, HDR10 to SDR: use MaxCLL as the source peak when below the mastering peak");
 module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
@@ -7163,6 +7170,15 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 						hdr10_param_use.max_frame_avg_light_level = nits;
 				}
 			}
+		}
+
+		if (use_new && xbmc_dv_new_hdr10_cll_peak &&
+		    (dst_format == FORMAT_SDR) && (src_format == FORMAT_HDR10)) {
+			u32 cll = hdr10_param_use.max_content_light_level;
+
+			if (cll && cll <= 10000 &&
+			    hdr10_param_use.max_display_mastering_lum > cll * 10000)
+				hdr10_param_use.max_display_mastering_lum = cll * 10000;
 		}
 
 		flag = dv_run_control_path(use_new,
