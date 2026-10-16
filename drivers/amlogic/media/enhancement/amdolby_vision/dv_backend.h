@@ -124,6 +124,34 @@ static bool dv_new_metadata_valid(const char *md, int size)
 	return count == (u8)md[ETSI_META_OFFSET - 1];
 }
 
+/* Zero min_pq in every L1 block. Parsed layout: be32 length, level byte, then
+ * min/max/avg_pq as be16 each (an HDR10+ -> DV RPU reads 003e 0821 0333 =
+ * 62/2081/819). The block walk was validated by dv_new_metadata_valid(). */
+static int dv_new_zero_l1_min(char *md, int size)
+{
+	u8 *p, *end;
+	int old = -1;
+
+	if (size < ETSI_META_OFFSET || size > DV5_MD_CAPACITY)
+		return old;
+	p = (u8 *)md + ETSI_META_OFFSET;
+	end = (u8 *)md + size;
+	while (end - p >= 5) {
+		u32 len = get_unaligned_be32(p);
+
+		if (len > end - p - 5)
+			return old;
+		if (p[4] == 1 && len >= 2) {
+			if (old < 0)
+				old = get_unaligned_be16(p + 5);
+			p[5] = 0;
+			p[6] = 0;
+		}
+		p += len + 5;
+	}
+	return old;
+}
+
 static bool dv_new_parse_raw_locked(struct provider_aux_req_s *req,
 				  bool drop, bool repeat)
 {

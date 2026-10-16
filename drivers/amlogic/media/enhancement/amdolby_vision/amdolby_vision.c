@@ -91,6 +91,12 @@ static bool xbmc_dv_new_vs10_route;
  * tone-maps for the real content range instead of the 1000/4000-nit
  * mastering display (the HDR10+ -> DV path gets this from its L1). */
 static bool xbmc_dv_new_hdr10_cll_peak;
+/* VS10 ->SDR on the newer library: declare a 0-nit source black. Dolby DM maps
+ * the declared source black to the target black, so HDR10's mastering min
+ * (typically 0.005 nit) and the L1 min Kodi derives from it for the HDR10+ ->
+ * DV conversion crush the steps below ~0.02 nit, where native DV (L1 min 0)
+ * keeps them. Only the bottom of the core1 curve moves. */
+static bool xbmc_dv_new_src_black0;
 /* The newer library does no display management for SDR output in video
  * priority (identity core1 tone curve, everything above 100 nits clips);
  * in graphics priority it tone-maps to the metadata like the 5.15 driver,
@@ -129,6 +135,8 @@ module_param(xbmc_dv_new_vs10_route, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_vs10_route, "Experimental: newer backend for every source to SDR output (needs xbmc_dv_new_sdr_route)");
 module_param(xbmc_dv_new_hdr10_cll_peak, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_hdr10_cll_peak, "Newer backend, HDR10 to SDR: use MaxCLL as the source peak when below the mastering peak");
+module_param(xbmc_dv_new_src_black0, bool, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_src_black0, "Newer backend, to SDR: 0-nit source black for HDR10 (mastering min) and converted HDR10+ (L1 min)");
 module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
@@ -7179,6 +7187,18 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 			if (cll && cll <= 10000 &&
 			    hdr10_param_use.max_display_mastering_lum > cll * 10000)
 				hdr10_param_use.max_display_mastering_lum = cll * 10000;
+		}
+
+		if (use_new && xbmc_dv_new_src_black0 && (dst_format == FORMAT_SDR)) {
+			if (src_format == FORMAT_HDR10)
+				hdr10_param_use.min_display_mastering_lum = 0;
+			else if ((src_format == FORMAT_DOVI) &&
+				 !READ_ONCE(xbmc_dv_source_native)) {
+				int old = dv_new_zero_l1_min(dv_new_md, dv_new_md_size);
+
+				if (debug_dolby & 4)
+					pr_info("DOLBY: src_black0 L1 min %d -> 0\n", old);
+			}
 		}
 
 		flag = dv_run_control_path(use_new,
