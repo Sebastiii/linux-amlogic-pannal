@@ -6820,7 +6820,12 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 		destroy_context();
 	}
 
-	use_new = dv_new_route(src_format, dst_format, vinfo);
+	/* Graphics-only processing (no vf: GUI, or before the first frame of a
+	 * playback) has no video size, which the newer library rejects (-EINVAL).
+	 * Keep it on legacy instead of marking the newer backend failed: that
+	 * flag clears only on the next provider change, so one such call after
+	 * playback start ran the whole playback on legacy. */
+	use_new = video_frame && dv_new_route(src_format, dst_format, vinfo);
 	if (use_new && !dv_prepare_new(&req, false, toggle_mode == 2, src_format)) {
 		dv_new_runtime_failed = true;
 		dv_retire_new();
