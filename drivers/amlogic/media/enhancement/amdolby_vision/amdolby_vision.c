@@ -1284,6 +1284,11 @@ static bool need_skip_cvm(unsigned int is_graphic)
 {
 	if (dolby_vision_flags & FLAG_CERTIFICAION) return false;
 	if (dolby_vision_flags & FLAG_FORCE_CVM) return false;
+	/* The newer library builds the core1 matrices around its own LUTs (SDR
+	 * read as ~300 nits, mapped back to 100): skipping CVM there keeps the
+	 * matrices but drops the mapping and over-exposes SDR->SDR. The skip only
+	 * suits the original library, whose SDR->SDR LUTs are identity. */
+	if (!is_graphic && dv_pending_new) return false;
 
 	return skip_cvm_tbl[is_graphic]
 		[dolby_vision_graphics_priority]
