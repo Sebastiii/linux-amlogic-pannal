@@ -1894,6 +1894,9 @@ static const u32 sdr_degamma[256] = {
 	  97647432,   98515755,   99388273,  100264990,  101145908,  102031030,  102920361,  103813904,
 };
 
+#include "dv_graphics_probe.h"
+#include "dv_graphics_stability.h"
+
 static int dolby_core2_set
   (u32 *p_core2_dm_regs,
    u32 *p_core2_lut,
@@ -1907,6 +1910,9 @@ static int dolby_core2_set
   u32 *last_dm = (u32 *)&dovi_setting.dm_reg2;
   u32 bypass_flag = 0;
   u32 update_flags = stb_core_setting_update_flag;
+  u32 *upload_lut;
+  bool upload, probe_held, probe_restoring;
+  bool graphics_fresh = dv_graphics_stability_fresh();
 
   /* The caller accepts a current CHANGE only when current CONST is absent.
    * Do not let previous-frame CONST suppress that curve's transfer and leave
@@ -1914,6 +1920,10 @@ static int dolby_core2_set
    */
   if ((current_update_flag & CP_FLAG_CHANGE_TC2) &&
       !(current_update_flag & CP_FLAG_CONST_TC2))
+    update_flags &= ~CP_FLAG_CONST_TC2;
+
+  /* The receipt carries this CP's flags; update_flags may retain old CONST. */
+  if (graphics_fresh)
     update_flags &= ~CP_FLAG_CONST_TC2;
 
   if (dolby_vision_on && (dolby_vision_flags & FLAG_DISABE_CORE_SETTING)) return 0;
@@ -2017,11 +2027,22 @@ static int dolby_core2_set
                  g_hpotch, g_vpotch, reset, set_lut,
                  update_flags);
 
+  /* A fresh accepted graphics request must reach the port loop even if
+   * its bytes equal the cache (for example an off/on intent generation). */
+  if (graphics_fresh)
+    set_lut = true;
+
   /* core2 metadata program done */
 
   VSYNC_WR_DV_REG(DOLBY_CORE2A_REG_START + 3, 1);
 
-  if (set_lut || reset || force_set_lut) {
+  upload = set_lut || reset || force_set_lut;
+  upload_lut = dv_graphics_probe_select(p_core2_lut, p_core2_dm_regs,
+      current_update_flag, reset, &upload, &probe_held, &probe_restoring);
+  if (!upload)
+    dv_graphics_probe_dma(p_core2_lut, upload_lut, current_update_flag,
+        reset, set_lut, force_set_lut, false, probe_held, probe_restoring);
+  if (upload) {
 
     if (is_meson_gxm() && (dolby_vision_flags & FLAG_CLKGATE_WHEN_LOAD_LUT))
       VSYNC_WR_DV_REG_BITS(DOLBY_CORE2A_CLKGATE_CTRL, 2, 2, 2);
@@ -2047,14 +2068,20 @@ static int dolby_core2_set
           (u32)((u64)sdr_degamma[j] * lib_peak / sdr_degamma[255]);
     }
 
+    dv_graphics_probe_dma(p_core2_lut, upload_lut, current_update_flag,
+        reset, set_lut, force_set_lut, true, probe_held, probe_restoring);
     VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_CTRL, 0x1401);
 
     for (i = 0; i < (256 * 5); i += 4) {
-      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, p_core2_lut[i + 3]);
-      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, p_core2_lut[i + 2]);
-      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, p_core2_lut[i + 1]);
-      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, p_core2_lut[i]);
+      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, upload_lut[i + 3]);
+      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, upload_lut[i + 2]);
+      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, upload_lut[i + 1]);
+      VSYNC_WR_DV_REG(DOLBY_CORE2A_DMA_PORT, upload_lut[i]);
     }
+
+    dv_graphics_probe_requested(probe_held, probe_restoring);
+    if (!probe_held && !probe_restoring)
+      dv_graphics_stability_requested();
 
     /* core2 lookup table program done */
 
@@ -2360,6 +2387,7 @@ static int is_graphic_changed(void)
       if (!is_osd_off) {
         graphic_pq_tries++;
         ret |= 2;
+
         force_set_lut = true;
       }
     }
@@ -2373,9 +2401,13 @@ static int is_graphic_changed(void)
     if (!is_osd_off) {
       old_dolby_vision_graphic_max = dolby_vision_graphic_max;
       ret |= 2;
+
       force_set_lut = true;
     }
   }
+
+  if (dv_graphics_stability_changed())
+    ret |= 2;
 
   return ret;
 }
@@ -2418,6 +2450,7 @@ void dolby_vision_backend_reset(void)
 
 	spin_lock_irqsave(&dv_backend_lock, flags);
 	dv_backend_epoch++;
+	WRITE_ONCE(dv_graphics_probe, 0);
 	dv_backend_applied = -1;
 	spin_unlock_irqrestore(&dv_backend_lock, flags);
 }
@@ -2432,6 +2465,20 @@ static u64 dv_backend_generation(void)
 	epoch = dv_backend_epoch;
 	spin_unlock_irqrestore(&dv_backend_lock, flags);
 	return epoch;
+}
+
+static bool dv_graphics_probe_backend(u64 *epoch, bool newer)
+{
+	unsigned long flags;
+	bool valid;
+
+	spin_lock_irqsave(&dv_backend_lock, flags);
+	*epoch = dv_backend_epoch;
+	valid = dolby_vision_on && dolby_vision_core1_on &&
+		dv_backend_applied >= 0 && (!newer || dv_backend_applied == 1) &&
+		dv_backend_pending_epoch == dv_backend_epoch;
+	spin_unlock_irqrestore(&dv_backend_lock, flags);
+	return valid;
 }
 
 static void dv_backend_publish(bool video, unsigned int mask, u32 width, u32 height)
@@ -2492,6 +2539,11 @@ static void apply_stb_core_settings
     graphics_h = dv_cert_graphic_height;
   }
 
+  if (reset || !(mask & 2)) {
+    if (READ_ONCE(dv_graphics_probe) == 2)
+      dv_graphics_probe_stop("apply_reset_or_mask");
+  }
+
   adjust_vpotch();
   if (mask & 1) {  // Core 1
     if (is_meson_txlx_stbmode()) {
@@ -2543,6 +2595,11 @@ static void apply_stb_core_settings
       else if (update_bk & CP_FLAG_CHANGE_TC2)
         stb_core2_const_flag = false;
     }
+    /* Only a same-CP fresh graphics receipt can retire historical CONST.
+     * Its current CP was validated without CONST by the shim/receipt helper. */
+    if (dv_graphics_stability_fresh())
+      stb_core2_const_flag = false;
+
     /* revert the core2 lut as last corret one when const case */
     if (stb_core2_const_flag)
       memcpy(&new_dovi_setting.dm_lut2, &dovi_setting.dm_lut2, sizeof(struct dm_lut_ipcore));
@@ -3161,6 +3218,8 @@ void enable_dolby_vision(int enable)
 				pr_dolby_dbg("Dolby Vision turn off\n");
 			}
 
+			dv_graphics_probe_disabled();
+			dv_graphics_stability_disabled();
 			destroy_context();
 
 			last_dolby_vision_ll_policy = DOLBY_VISION_LL_DISABLE;
@@ -6269,6 +6328,7 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 	int src_bdp = 12;
 	bool video_frame = false;
 	u64 backend_epoch = dv_backend_generation();
+	u64 graphics_trace_cp = 0;
 	struct vframe_master_display_colour_s *p_mdc;
 	unsigned int current_mode = dolby_vision_mode;
 	u32 target_lumin_max = 0;
@@ -7137,6 +7197,7 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 			}
 		}
 
+		dv_graphics_stability_begin();
 		flag = dv_run_control_path(use_new,
 			                src_format, dst_format,
 			                use_new ? dv_new_comp : comp_buf[current_id],
@@ -7159,12 +7220,27 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 			                &hdr10_param_use,
 			                &new_dovi_setting);
 
+		dv_graphics_stability_cp(use_new, flag >= 0);
+		if (flag >= 0)
+			dv_gfx_probe.pending_cp = 0;
+		if (flag >= 0 && dv_graphics_probe_tracing()) {
+			graphics_trace_cp = ++dv_gfx_probe.cp;
+			dv_gfx_probe.pending_cp = graphics_trace_cp;
+			dv_gfx_probe.pending_frame = frame_count;
+			dv_graphics_probe_metadata("pre", graphics_trace_cp,
+				use_new, backend_epoch, flag);
+		}
+
 		// Copy original source metadata for standard DV (non-LL) output
 		if (flag >= 0 && (src_format == FORMAT_DOVI) && (dst_format == FORMAT_DOVI) &&
 		    !((dolby_vision_flags & FLAG_FORCE_DOVI_LL) ||
 		      dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422))
 			source_meta_copy((unsigned char *)(use_new ? dv_new_md : md_buf[current_id]),
 				 use_new ? dv_new_md_size : total_md_size, &new_dovi_setting.md_reg3);
+
+		if (graphics_trace_cp)
+			dv_graphics_probe_metadata("post", graphics_trace_cp,
+				use_new, backend_epoch, flag);
 
 		if (debug_dolby & 4) {
 			u16 src_L1_min = (md_buf[current_id][ETSI_META_OFFSET + 5] << 4) |
@@ -7258,6 +7334,8 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 	}
 
 	if (flag < 0) {
+		if (READ_ONCE(dv_graphics_probe) == 2)
+			dv_graphics_probe_stop("cp_failed");
 		if (use_new) {
 			dv_new_runtime_failed = true;
 			dv_retire_new();

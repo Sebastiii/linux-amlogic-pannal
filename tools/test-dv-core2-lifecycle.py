@@ -32,6 +32,29 @@ using u8=uint8_t;using u16=uint16_t;using u32=uint32_t;using u64=uint64_t;
 #define BIT(x) (1U<<(x))
 '''
 STUBS=r'''
+
+/* BEGIN default-off graphics probe stubs */
+#define READ_ONCE(x) (x)
+// Retained lifecycle oracle covers ordinary mode0. Active probe behavior has
+// a separate production-header fixture; no existing assertion is relaxed.
+static unsigned int dv_graphics_probe;
+static void dv_graphics_probe_stop(const char*){assert(dv_graphics_probe==0);}
+static u32* dv_graphics_probe_select(u32* normal,const u32*,u32,bool,bool*,bool*held,bool*restoring){
+ assert(dv_graphics_probe==0);*held=*restoring=false;return normal;
+}
+static void dv_graphics_probe_dma(const u32*,const u32*,u32,bool,bool,bool,bool,bool held,bool restoring){
+ assert(dv_graphics_probe==0&&!held&&!restoring);
+}
+static void dv_graphics_probe_requested(bool held,bool restoring){assert(!held&&!restoring);}
+static void dv_graphics_probe_disabled(){assert(dv_graphics_probe==0);}
+/* END default-off graphics probe stubs */
+/* BEGIN default-off graphics stability stubs */
+// Ordinary mode0 only; active behavior is exercised by the real-header suite.
+static bool dv_graphics_stable;
+static bool dv_graphics_stability_fresh(){assert(!dv_graphics_stable);return false;}
+static void dv_graphics_stability_disabled(){assert(!dv_graphics_stable);}
+static void dv_graphics_stability_requested(){assert(!dv_graphics_stable);}
+/* END default-off graphics stability stubs */
 static_assert(sizeof(dm_lut_ipcore)==1280*sizeof(u32));
 static_assert(sizeof(dm_reg_ipcore2)==24*sizeof(u32));
 static dovi_setting_s dovi_setting{},new_dovi_setting{};
@@ -227,7 +250,7 @@ def generate(text):
 
 def run_tests(args):
     resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-    source=args.source or ROOT/'drivers/amlogic/media/enhancement/amdolby_vision/amdolby_vision.c';text=source.read_text()
+    source=args.source or ((args.candidate/'amdolby_vision.c') if args.candidate else None) or ROOT/'drivers/amlogic/media/enhancement/amdolby_vision/amdolby_vision.c';text=source.read_text()
     base,parts=generate(text)
     (OUT/'production-extraction.cpp').write_text(base)
     info={'source':str(source),'sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'fragments':{k:{'sha256':hashlib.sha256(v.encode()).hexdigest(),'bytes':len(v)}for k,v in parts.items()},'results':[]}
@@ -237,7 +260,7 @@ def run_tests(args):
         compile_result=subprocess.run(cmd,capture_output=True,text=True)
         (OUT/(name+'-compile.txt')).write_text(compile_result.stdout+compile_result.stderr)
         assert compile_result.returncode==0,(name,compile_result.stderr)
-        r=subprocess.run([str(exe),str(backend),mode],capture_output=True,text=True,env={**os.environ,'ASAN_OPTIONS':'detect_leaks=1','UBSAN_OPTIONS':'halt_on_error=1'})
+        r=subprocess.run([str(exe),str(backend),mode],capture_output=True,text=True,env={**os.environ,'ASAN_OPTIONS':os.environ.get('ASAN_OPTIONS','detect_leaks=1'),'UBSAN_OPTIONS':'halt_on_error=1'})
         (OUT/(name+'-run.txt')).write_text(r.stdout+r.stderr)
         assert (r.returncode==0)==expect,(name,r.stdout,r.stderr)
         if not expect:assert 'Assertion' in r.stderr,(name,r.stderr)
@@ -255,9 +278,9 @@ def run_tests(args):
           'reset-no-dm':('if (reset || p_core2_dm_regs[i] != last_dm[i]) {','if (p_core2_dm_regs[i] != last_dm[i]) {'),
           'disable-keeps-counter':('\t\tdolby_vision_core2_on_cnt = 0;','\t\t(void)0;'),
           'post-or-const-decision':('if (update_bk != CP_FLAG_CHANGE_ALL) {','if (stb_core_setting_update_flag != CP_FLAG_CHANGE_ALL) {'),
-          'reset-no-dma':('if (set_lut || reset || force_set_lut) {','if (set_lut || force_set_lut) {'),
+          'reset-no-dma':(('upload = set_lut || reset || force_set_lut;','upload = set_lut || force_set_lut;') if 'upload = set_lut || reset || force_set_lut;' in base else ('if (set_lut || reset || force_set_lut) {','if (set_lut || force_set_lut) {')),
           'truncated-dma':('i < (256 * 5); i += 4','i < (256 * 5 - 4); i += 4'),
-          'wrong-dma-word':('p_core2_lut[i + 3]);','p_core2_lut[i + 2]);'),
+          'wrong-dma-word':(('upload_lut[i + 3]);','upload_lut[i + 2]);') if 'upload_lut[i + 3]);' in base else ('p_core2_lut[i + 3]);','p_core2_lut[i + 2]);')),
           'disable-keeps-const':('\t\t\tstb_core2_const_flag = false;','\t\t\t(void)0;'),
           'disable-keeps-cache':('memset(&dovi_setting, 0, sizeof(dovi_setting));','(void)0;'),
           'disable-no-seed':('\t\t\tstb_core_setting_update_flag = CP_FLAG_CHANGE_ALL;','\t\t\t(void)0;'),
@@ -272,7 +295,7 @@ def run_tests(args):
     run(base,'adjacent-change',not args.expect_adjacent_failures,mode='adjacent')
     run(base,'adjacent-change-legacy',not args.expect_adjacent_failures,mode='adjacent',backend=0)
     if args.negative_controls:
-        broken=replace_once(base,'update_flags &= ~CP_FLAG_CONST_TC2;','(void)0;')
+        broken=replace_once(base,'if ((current_update_flag & CP_FLAG_CHANGE_TC2) &&','if (false && (current_update_flag & CP_FLAG_CHANGE_TC2) &&')
         run(broken,'historical-const-veto',False,mode='adjacent')
     (OUT/'results.json').write_text(json.dumps(info,indent=2)+'\n')
     print('Host request/ownership boundary only; opaque CP and physical application are unverified.')
@@ -280,6 +303,7 @@ def main():
     global ROOT,OUT
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--root',type=Path,default=ROOT)
+    ap.add_argument('--candidate',type=Path,help='Directory containing alternative production driver')
     ap.add_argument('--source',type=Path,help='Alternative driver file for before/after verification')
     ap.add_argument('--output',type=Path,help='Retain generated sources and results here')
     ap.add_argument('--negative-controls',action='store_true')

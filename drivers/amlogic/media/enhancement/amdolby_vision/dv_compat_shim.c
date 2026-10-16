@@ -16,6 +16,11 @@
 enum vd_path_e;
 #include "amdolby_vision.h"
 #include "dv5_compat_abi.h"
+#include "dv_graphics_policy.h"
+
+_Static_assert(offsetof(struct m_dovi_setting_s, reserved) +
+	       DV_GFX_REQUEST_SLOT * sizeof(u32) == 19800,
+	       "graphics reference transport offset");
 
 #ifdef CONFIG_CFI_CLANG
 #error "DV5 compat shim requires the supported non-CFI target kernel"
@@ -52,6 +57,7 @@ static const struct dv5_funcs *blob_funcs;
 static struct dolby_vision_func_s adapted_funcs;
 static struct module *blob_owner;
 static unsigned long blob_text;
+static bool blob_graphics_reference;
 static DEFINE_MUTEX(registration_lock);
 
 /* All adapter calls are serialized by the driver's dovi_lock.  Registration
@@ -207,6 +213,7 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	struct private_info_s *vid = &m->input[0];
 	struct private_info_s *gfx = &m->input[DV5_IPCORE2_ID];
 	bool need_reset;
+	struct dv_graphics_request graphics = {0};
 	int flag;
 	int ret;
 
@@ -316,6 +323,15 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	last_cp.priority = set_priority;
 	last_cp.width = vid->video_width;
 	last_cp.height = vid->video_height;
+	if (blob_graphics_reference) {
+		amdv_graphics_request(in_format == FORMAT_DOVI && !m->use_ll_flag &&
+			!m->ll_rgb_desired && !m->dovi2hdr10_nomapping &&
+			set_priority == V_PRIORITY && output->g_format == G_SDR_RGB &&
+			output->g_bitdepth == 8, &graphics);
+		m->reserved[DV_GFX_REQUEST_SLOT] = DV_GFX_REQUEST_MAGIC;
+		m->reserved[DV_GFX_ENABLE_SLOT] = graphics.enable;
+		m->reserved[DV_GFX_RETRY_SLOT] = graphics.retry;
+	}
 
 	flag = blob_funcs->multi_control_path(m);
 	blob_put();
@@ -372,6 +388,19 @@ static int cp_adapter(enum signal_format_enum in_format, enum signal_format_enum
 	if (flag & DV5_CP_FLAG_BLOB_CHANGE_TC2)
 		ret |= DV5_CP_FLAG_CHANGE_TC2;
 	ret |= flag & DV5_CP_FLAG_CONST_TC2;
+	if (blob_graphics_reference && m->reserved[DV_GFX_ACK_SLOT] == DV_GFX_ACK_MAGIC &&
+	    !(m->reserved[DV_GFX_FLAGS_SLOT] & ~(DV_GFX_ACK_MODE | DV_GFX_ACK_FRESH | DV_GFX_ACK_GRAPHICS)) &&
+	    (m->reserved[DV_GFX_FLAGS_SLOT] & DV_GFX_ACK_GRAPHICS)) {
+		bool mode = !!(m->reserved[DV_GFX_FLAGS_SLOT] & DV_GFX_ACK_MODE);
+		bool fresh = !!(m->reserved[DV_GFX_FLAGS_SLOT] & DV_GFX_ACK_FRESH);
+
+		amdv_graphics_result(&graphics, mode, fresh, ret);
+		/* Raw 0x100 is generic TC, not Core2. Only this explicit graphics
+		 * receipt may add TC2; native/default-off flags remain unchanged. */
+		if (graphics.tracked && mode == graphics.enable && fresh &&
+		    !(ret & DV5_CP_FLAG_CONST_TC2))
+			ret |= DV5_CP_FLAG_CHANGE_TC2;
+	}
 	return ret;
 }
 
@@ -557,10 +586,14 @@ int register_dv5shim_func(const struct dv5_funcs *f)
 	adapted_funcs.metadata_parser_release = mp_release_adapter;
 	adapted_funcs.control_path = cp_adapter;
 	cp_setup_invalid();
+	blob_graphics_reference = strstr(f->version_info, DV_GFX_CAPABILITY) != NULL;
+	amdv_graphics_capability(blob_graphics_reference);
 	ret = register_dv_functions_multi(&adapted_funcs);
 	if (!ret)
 		goto out;
 rollback:
+	blob_graphics_reference = false;
+	amdv_graphics_capability(false);
 	mp_release_owned();
 	blob_funcs = NULL;
 	blob_owner = NULL;
@@ -585,6 +618,8 @@ int unregister_dv5shim_func(void)
 	/* Module exit cannot leave live callbacks into retiring module text. */
 	if (ret)
 		panic("DV5: driver failed to quiesce registered backend (%d)", ret);
+	blob_graphics_reference = false;
+	amdv_graphics_capability(false);
 	mp_release_owned();
 	blob_funcs = NULL;
 	blob_owner = NULL;
@@ -612,6 +647,9 @@ static int __init dv_compat_shim_init(void)
 	BUILD_BUG_ON(offsetof(struct m_dovi_setting_s, output_vsif) != 19732);
 	BUILD_BUG_ON(offsetof(struct m_dovi_setting_s, output_ctrl_data) != 19776);
 	BUILD_BUG_ON(offsetof(struct m_dovi_setting_s, content_info) != 19792);
+	BUILD_BUG_ON(offsetof(struct m_dovi_setting_s, reserved) != 19796);
+	BUILD_BUG_ON(offsetof(struct m_dovi_setting_s, reserved) +
+		     DV_GFX_REQUEST_SLOT * sizeof(u32) != 19800);
 	do {
 		get_random_bytes(&dv5_stack_chk_guard, sizeof(dv5_stack_chk_guard));
 		dv5_stack_chk_guard &= ~0xffUL;

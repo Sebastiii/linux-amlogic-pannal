@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile the actual shim callbacks with host Linux-service mocks.
 Host tests establish adapter contracts, not target ABI or concurrency.
+Graphics request/result services are driver mocks; presenter policy is tested separately.
 """
 from pathlib import Path
 import subprocess,re,os,argparse,tempfile
@@ -16,6 +17,8 @@ private=(p/'amdolby_vision.h').read_text()
 private=re.sub(r'^#include.*\n','',private,flags=re.M)
 abi=(p/'dv5_compat_abi.h').read_text()
 abi=re.sub(r'^#include.*\n','',abi,flags=re.M)
+policy=(p/'dv_graphics_policy.h').read_text()
+policy=re.sub(r'^#include.*\n','',policy,flags=re.M)
 source=(p/'dv_compat_shim.c').read_text()
 source=re.sub(r'^#include.*\n','',source,flags=re.M)
 # Actual AArch64 profile validation is exercised separately. Registration uses
@@ -97,6 +100,28 @@ static __noreturn void host_panic(const char *fmt, ...) { (void)fmt; abort(); }
 #define panic(...) host_panic(__VA_ARGS__)
 '''
 services=r'''
+
+/* Driver service boundary: capture requests/receipts without substituting
+ * shim eligibility, ACK parsing, flag conversion or registration logic. */
+static bool host_graphics_capable,host_graphics_desired,host_graphics_tracked;
+static unsigned host_capability_calls,host_request_calls,host_result_calls;
+static bool host_request_eligible,host_result_mode,host_result_fresh;
+static int host_result_flags;
+static struct dv_graphics_request host_request,host_result;
+void amdv_graphics_capability(bool available) {
+ host_graphics_capable=available;host_capability_calls++;
+}
+void amdv_graphics_request(bool eligible,struct dv_graphics_request *request) {
+ host_request_calls++;host_request_eligible=eligible;
+ *request=(struct dv_graphics_request){.epoch=0x12345678,.generation=17,
+  .enable=eligible && host_graphics_desired && host_graphics_capable,
+  .retry=host_graphics_tracked,.tracked=host_graphics_tracked && host_graphics_capable};
+ host_request=*request;
+}
+void amdv_graphics_result(const struct dv_graphics_request *request,bool mode,bool fresh,int flags) {
+ host_result_calls++;host_result=*request;host_result_mode=mode;
+ host_result_fresh=fresh;host_result_flags=flags;
+}
 static int driver_reg_ret,driver_unreg_ret;
 static unsigned l11_count,l11_clear;
 static struct dolby_vision_func_s *registered;
@@ -114,10 +139,16 @@ void amdv_set_l11(const struct dv5_vsif_parameter_s *v,const struct dv5_content_
 '''
 tests=r'''
 static int cp_ret,cp_bad;
+static u32 cp_ack_magic,cp_ack_flags,cp_request[5];
+static bool cp_flip_preference;
 static unsigned cp_calls,cp_resets;
 static int fake_cp(struct m_dovi_setting_s *m) {
  if (!m->num_input) {cp_resets++;return -1;}
  cp_calls++;
+ memcpy(cp_request,m->reserved+DV_GFX_REQUEST_SLOT,sizeof(cp_request));
+ if(cp_flip_preference)host_graphics_desired=false;
+ m->reserved[DV_GFX_ACK_SLOT]=cp_ack_magic;
+ m->reserved[DV_GFX_FLAGS_SLOT]=cp_ack_flags;
  m->dm_reg1; /* removed below; keep mocking the real newer nested field */
  m->core1[0].dm_reg.s_range=0xfeed;
  m->dm_reg3.d2c_coeff1=0xbeef;
@@ -158,6 +189,10 @@ static void setup_mock(void) {
  blob_funcs=&mock_funcs;blob_owner=&fake_owner;fake_owner.live=true;
  fake_owner.refs=0;mp_ctx=&context_token;mp_attached=false;mp_ready=true;
  cp_forget();cp_setup_invalid();
+ blob_graphics_reference=false;host_graphics_capable=false;
+ host_graphics_desired=host_graphics_tracked=false;
+ host_capability_calls=host_request_calls=host_result_calls=0;
+ cp_ack_magic=cp_ack_flags=0;cp_flip_preference=false;memset(cp_request,0,sizeof(cp_request));
 }
 static int call_cp(struct dovi_setting_s *s) {
  char comp[4]={0},md[8]={0};struct hdr10_parameter hdr={0};
@@ -282,6 +317,122 @@ static void test_registration(void) {
  assert(!blob_funcs && !blob_owner && !blob_text && !registered && !mp_ctx && release_calls==3);
  mock_profile_registration=false;
 }
+
+static void graphics_output(struct dovi_setting_s *s) {
+ memset(s,0,sizeof(*s));s->video_width=1920U<<16;s->video_height=1080U<<16;
+ s->g_format=G_SDR_RGB;s->g_bitdepth=8;
+}
+static void setup_graphics(struct dovi_setting_s *s) {
+ setup_mock();mp_attached=true;graphics_output(s);
+ blob_graphics_reference=true;host_graphics_capable=true;
+ host_graphics_desired=host_graphics_tracked=true;
+ cp_ret=DV5_CP_FLAG_BLOB_CHANGE_TC;cp_bad=0;
+ cp_ack_magic=DV_GFX_ACK_MAGIC;
+ cp_ack_flags=DV_GFX_ACK_MODE|DV_GFX_ACK_FRESH|DV_GFX_ACK_GRAPHICS;
+}
+static int call_cp_priority(struct dovi_setting_s *s,enum priority_mode_enum priority) {
+ char comp[4]={0},md[8]={0};struct hdr10_parameter hdr={0};
+ return cp_adapter(FORMAT_DOVI,FORMAT_DOVI,comp,4,md,8,priority,10,0,0,0,100,0,1000,1,&hdr,s);
+}
+static void test_graphics_protocol(void) {
+ struct dovi_setting_s s,before;
+ /* Match the already-tested fixed byte transport, not a guessed struct tail. */
+ assert(offsetof(struct m_dovi_setting_s,reserved)+4*DV_GFX_REQUEST_SLOT==19800);
+ assert(offsetof(struct m_dovi_setting_s,reserved)+4*DV_GFX_ENABLE_SLOT==19804);
+ assert(offsetof(struct m_dovi_setting_s,reserved)+4*DV_GFX_ACK_SLOT==19808);
+ assert(offsetof(struct m_dovi_setting_s,reserved)+4*DV_GFX_FLAGS_SLOT==19812);
+ assert(offsetof(struct m_dovi_setting_s,reserved)+4*DV_GFX_RETRY_SLOT==19816);
+ /* Fresh graphics receipt adds TC2 while preserving original TC flags. */
+ setup_graphics(&s);assert(call_cp(&s)==(0x10|0x20));
+ assert(host_request_calls==1 && host_request_eligible);
+ assert(cp_request[0]==DV_GFX_REQUEST_MAGIC && cp_request[1]==1 && cp_request[4]==1);
+ assert(cp_request[2]==0 && cp_request[3]==0); /* ACK never reused as input. */
+ assert(host_result_calls==1 && host_result_mode && host_result_fresh);
+ assert(host_result_flags==0x10 && host_result.epoch==0x12345678 && host_result.generation==17);
+ assert(host_result.enable && host_result.tracked && host_result.retry);
+ /* The driver gets a copy of the captured request, not a later preference. */
+ assert(host_request.epoch==host_result.epoch && host_request.generation==host_result.generation &&
+        host_request.enable==host_result.enable && host_request.retry==host_result.retry &&
+        host_request.tracked==host_result.tracked);
+ setup_graphics(&s);cp_flip_preference=true;assert(call_cp(&s)==(0x10|0x20));
+ assert(!host_graphics_desired && host_result.enable && host_result_mode);
+ /* No ACK, wrong magic, unknown bits, and absent graphics fail closed. */
+ for(unsigned i=0;i<4;i++) {
+  setup_graphics(&s);
+  if(i==0)cp_ack_magic=0;
+  if(i==1)cp_ack_magic=DV_GFX_ACK_MAGIC^1;
+  if(i==2)cp_ack_flags|=8;
+  if(i==3)cp_ack_flags&=~DV_GFX_ACK_GRAPHICS;
+  assert(call_cp(&s)==0x10 && host_result_calls==0);
+ }
+ /* A mode mismatch is reported for actual-driver rejection, never forced. */
+ setup_graphics(&s);cp_ack_flags&=~DV_GFX_ACK_MODE;
+ assert(call_cp(&s)==0x10 && host_result_calls==1);
+ assert(host_result.enable && !host_result_mode);
+ /* Current CONST remains authoritative even after fresh concatenation. */
+ setup_graphics(&s);cp_ret|=DV5_CP_FLAG_CONST_TC2;
+ assert(call_cp(&s)==(0x10|DV5_CP_FLAG_CONST_TC2));
+ assert(host_result_calls==1 && host_result_fresh);
+ assert(host_result_flags==(0x10|DV5_CP_FLAG_CONST_TC2));
+ /* Cached ACK and untracked native history do not synthesize TC2. */
+ setup_graphics(&s);cp_ack_flags&=~DV_GFX_ACK_FRESH;
+ assert(call_cp(&s)==0x10 && host_result_calls==1 && !host_result_fresh);
+ setup_graphics(&s);host_graphics_desired=host_graphics_tracked=false;
+ cp_ack_flags=DV_GFX_ACK_FRESH|DV_GFX_ACK_GRAPHICS;
+ assert(call_cp(&s)==0x10 && !host_result.tracked && !cp_request[1] && !cp_request[4]);
+ /* Route exits request native graphics; a tracked fresh native ACK permits
+  * recovery. Actual driver applied-state/DMA handling is tested separately. */
+ for(unsigned i=0;i<5;i++) {
+  setup_graphics(&s);
+  if(i==0)s.g_format=G_HDR_RGB;
+  if(i==1)s.g_bitdepth=10;
+  if(i==2)s.use_ll_flag=1;
+  if(i==3)s.ll_rgb_desired=1;
+  if(i==4)s.dovi2hdr10_nomapping=1;
+  cp_ack_flags=DV_GFX_ACK_FRESH|DV_GFX_ACK_GRAPHICS;
+  assert(call_cp(&s)==(0x10|0x20));
+  assert(!host_request_eligible && !cp_request[1] && cp_request[4]);
+  assert(host_result_calls==1 && !host_result_mode && !host_result.enable);
+ }
+ setup_graphics(&s);cp_ack_flags=DV_GFX_ACK_FRESH|DV_GFX_ACK_GRAPHICS;
+ assert(call_cp_priority(&s,G_PRIORITY)==(0x10|0x20));
+ assert(!host_request_eligible && !cp_request[1] && !host_result.enable);
+ /* CP failure or bounds rejection cannot publish an otherwise valid ACK. */
+ setup_graphics(&s);before=s;cp_ret=-2;
+ assert(call_cp(&s)==-2 && host_result_calls==0 && !memcmp(&s,&before,sizeof(s)));
+ for(unsigned i=1;i<=5;i++) {
+  setup_graphics(&s);before=s;cp_bad=i;
+  assert(call_cp(&s)==-EOVERFLOW && host_result_calls==0 && !memcmp(&s,&before,sizeof(s)));
+ }
+ cp_bad=0;
+ /* Unsupported registration cannot opt in even if a mock CP invents an ACK. */
+ setup_graphics(&s);blob_graphics_reference=false;host_graphics_capable=false;
+ assert(call_cp(&s)==0x10 && host_request_calls==0 && host_result_calls==0);
+ for(unsigned i=0;i<5;i++)assert(cp_request[i]==0);
+}
+static void test_graphics_registration(void) {
+ const char *versions[]={
+  "chip_name = g12b [stb:2.6:e]-[v1.0]-",
+  "chip_name = g12b [stb:2.6:e]-[v1.0]-[p3i-gfxref:1]",
+  "chip_name = g12b [stb:2.6:e]-[v1.0]-[p3i-gfxref:3]",
+  "chip_name = g12b [stb:2.6:e]-[v1.0]-" DV_GFX_CAPABILITY};
+ for(unsigned i=0;i<4;i++) {
+  setup_mock();blob_funcs=NULL;blob_owner=NULL;mp_ctx=NULL;mp_ready=false;mp_attached=false;
+  mock_profile_registration=true;init_fail=false;reset_ret=driver_reg_ret=driver_unreg_ret=0;
+  mock_funcs.version_info=versions[i];
+  assert(register_dv5shim_func(&mock_funcs)==0);
+  assert(blob_graphics_reference==(i==3) && host_graphics_capable==(i==3));
+  assert(host_capability_calls==1);
+  assert(unregister_dv5shim_func()==0);
+  assert(!blob_graphics_reference && !host_graphics_capable && host_capability_calls==2);
+ }
+ setup_mock();blob_funcs=NULL;blob_owner=NULL;mp_ctx=NULL;mp_ready=false;mp_attached=false;
+ mock_funcs.version_info=versions[3];mock_profile_registration=true;driver_reg_ret=-EBUSY;
+ assert(register_dv5shim_func(&mock_funcs)==-EBUSY);
+ assert(!blob_graphics_reference && !host_graphics_capable && !blob_funcs && !mp_ctx);
+ assert(host_capability_calls==2); /* Capability withdrawn on registration rollback. */
+ driver_reg_ret=0;mock_profile_registration=false;
+}
 static unsigned cfi_real_calls;
 static void fake_checker(u64 id,void *target,void *diag) {
  assert(id==0xf7247573865c0423ULL);assert((unsigned long)target==(unsigned long)fake_checker+0x1e8);
@@ -310,14 +461,14 @@ static void test_cfi(void) {
 }
 int main(void) {
  assert(dv_compat_shim_init()==0);assert(dv5_stack_chk_guard && !(dv5_stack_chk_guard&0xff));
- test_cp();test_mp();test_transitions();test_registration();test_cfi();
- puts("PASS: CP error/output/range contracts, sleepable parser lifetime/attach/reset/length guards, transactional registration, strict CFI and fatal failure hooks");
+ test_cp();test_mp();test_transitions();test_registration();test_graphics_protocol();test_graphics_registration();test_cfi();
+ puts("PASS: CP error/output/range contracts, sleepable parser lifetime/attach/reset/length guards, transactional registration, strict CFI and fatal failure hooks; actual shim graphics capability/request/ACK/CONST/error contracts (driver services mocked)");
  return 0;
 }
 '''
 tests=tests.replace(' m->dm_reg1; /* removed below; keep mocking the real newer nested field */\n','')
 # dm_reg_ipcore3 uses d2c coefficient fields copied from actual source.
-combined=preamble+public+private+abi+services+source+tests
+combined=preamble+public+private+abi+policy+services+source+tests
 flags=['-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=address,undefined','-fno-omit-frame-pointer']
 with tempfile.TemporaryDirectory(prefix='dv-shim-test-') as td:
     c=Path(td)/'shim.c';binary=Path(td)/'shim';c.write_text(combined)
