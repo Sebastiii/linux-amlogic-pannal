@@ -97,6 +97,12 @@ static bool xbmc_dv_new_hdr10_cll_peak;
  * DV conversion crush the steps below ~0.02 nit, where native DV (L1 min 0)
  * keeps them. Only the bottom of the core1 curve moves. */
 static bool xbmc_dv_new_src_black0;
+/* VS10 HDR10->SDR on the newer library: source peak in nits measured on the
+ * decoded picture by userspace (0 = off), written live. Clamped to 100..the
+ * mastering peak; it takes precedence over the MaxCLL peak. HDR10 carries no
+ * per-scene peak, so Dolby DM otherwise tone-maps for the mastering display
+ * while the DV grade of the same title states its real scene peak in L1. */
+static uint xbmc_dv_new_hdr10_meas_peak;
 /* The newer library does no display management for SDR output in video
  * priority (identity core1 tone curve, everything above 100 nits clips);
  * in graphics priority it tone-maps to the metadata like the 5.15 driver,
@@ -137,6 +143,8 @@ module_param(xbmc_dv_new_hdr10_cll_peak, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_hdr10_cll_peak, "Newer backend, HDR10 to SDR: use MaxCLL as the source peak when below the mastering peak");
 module_param(xbmc_dv_new_src_black0, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_src_black0, "Newer backend, to SDR: 0-nit source black for HDR10 (mastering min) and converted HDR10+ (L1 min)");
+module_param(xbmc_dv_new_hdr10_meas_peak, uint, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_hdr10_meas_peak, "Newer backend, HDR10 to SDR: measured source peak in nits from userspace (0 off, clamped 100..mastering)");
 module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
@@ -7187,6 +7195,18 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 			if (cll && cll <= 10000 &&
 			    hdr10_param_use.max_display_mastering_lum > cll * 10000)
 				hdr10_param_use.max_display_mastering_lum = cll * 10000;
+		}
+
+		if (use_new && (dst_format == FORMAT_SDR) && (src_format == FORMAT_HDR10)) {
+			u32 meas = READ_ONCE(xbmc_dv_new_hdr10_meas_peak);
+
+			/* from the stream's own mastering peak, so it also replaces
+			 * a MaxCLL peak set above */
+			if (meas) {
+				meas = clamp_t(u32, meas, 100, 10000) * 10000;
+				hdr10_param_use.max_display_mastering_lum =
+					min_t(u32, hdr10_param.max_display_mastering_lum, meas);
+			}
 		}
 
 		if (use_new && xbmc_dv_new_src_black0 && (dst_format == FORMAT_SDR)) {
