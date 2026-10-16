@@ -2406,9 +2406,6 @@ static int is_graphic_changed(void)
     }
   }
 
-  if (dv_graphics_stability_changed())
-    ret |= 2;
-
   return ret;
 }
 
@@ -7862,6 +7859,11 @@ static int dv_process_internal(struct vframe_s *vf,
 		format_changed = 1;
 
 	graphic_status = is_graphic_changed();
+	/* A retained frame outlives its decoder metadata during teardown.
+	 * Let the video-off path retire it without requesting a graphics CP.
+	 */
+	if (!video_turn_off && dv_graphics_stability_changed())
+		graphic_status |= 2;
 
 	/* monitor policy changes */
 	policy_changed = is_policy_changed();

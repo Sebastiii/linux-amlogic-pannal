@@ -137,6 +137,21 @@ static void paused_retry_and_routes(){
  assert(!dv_graphics_stability_changed());}
  puts("paused intent requests fresh CP, never cached force; completed ineligible native mode stops retries; route scheduling guards PASS");++stable_groups;
 }
+static void stopped_video_does_not_retry(){
+ setup();turn_on();++fixture_epoch;assert(request().retry);
+ // Provider retirement invalidates the receipt while the retained frame and
+ // old route still exist. Neither the off transition nor idle may reparse it.
+ for(int i=0;i<3;++i){assert(fixture_graphic_changed(true)==0);assert(request().retry&&!force_set_lut);}
+ // Ordinary OSD changes keep their original bits even while video is off.
+ for(int bits=0;bits<4;++bits)assert(fixture_graphic_changed(true,bits)==bits);
+ // A paused active layer and the next video still request their fresh CP.
+ assert(fixture_graphic_changed(false)==2&&!force_set_lut);
+ admit(tagged(2),request(),true,true);present();expect_dma(tagged(2));assert(fixture_graphic_changed(false)==0);
+ dv_graphics_stable_set("0",nullptr);assert(request().retry);
+ assert(fixture_graphic_changed(true)==0&&fixture_graphic_changed(false)==2);
+ admit(tagged(3),request(),false,true);present();expect_dma(tagged(3));assert(!request().retry);
+ puts("video-off transition/idle skip optional retry, retain ordinary OSD bits and active/paused retries PASS");++stable_groups;
+}
 static void probe_exclusion(){
  for(int mode=1;mode<=2;++mode){
   setup();stable_on();assert(dv_graphics_probe_set(mode==1?"1":"2",nullptr)==-EBUSY);
@@ -149,7 +164,7 @@ static void probe_exclusion(){
  assert(dv_gfx_probe.inflight);dv_graphics_probe_set("0",nullptr);assert(dv_graphics_stable_set("1",nullptr)==-EBUSY);
  puts("both temporary probe modes, pending native restoration and in-flight uploads mutually exclude persistent policy PASS");++stable_groups;
 }
-int main(){defaults_and_capability();fresh_dma_receipt();cached_mismatch_failure();const_lifetimes();on_off_and_aba();skipped_and_invalidated();paused_retry_and_routes();probe_exclusion();probe_tests();printf("%u actual graphics-policy groups PASS plus retained temporary probe groups\n",stable_groups);}
+int main(){defaults_and_capability();fresh_dma_receipt();cached_mismatch_failure();const_lifetimes();on_off_and_aba();skipped_and_invalidated();paused_retry_and_routes();stopped_video_does_not_retry();probe_exclusion();probe_tests();printf("%u actual graphics-policy groups PASS plus retained temporary probe groups\n",stable_groups);}
 '''
 
 def produce(c, probe, stable, policy):
@@ -175,9 +190,13 @@ def produce(c, probe, stable, policy):
     cp_line = 'dv_graphics_stability_cp(use_new, flag >= 0);'
     assert c.count(cp_line) == 1
     code += '\nstatic void fixture_policy_cp(bool use_new,bool accepted){int flag=accepted?0:-1;'+cp_line+'}\n'
-    start = c.index('  if (dv_graphics_stability_changed())\n    ret |= 2;')
-    tail = c[start:c.index('\n}', start)]
-    code += '\nstatic int fixture_graphic_changed(){int ret=0;'+tail+'}\n'+TESTS
+    start = c.index('\tgraphic_status = is_graphic_changed();')
+    tail = c[start:c.index('\n\t/* monitor policy changes */', start)]
+    assert c.index('video_status = is_video_turn_on(video_on, VD1_PATH);') < start
+    assert c.index('video_turn_off = true;', c.index('video_status = is_video_turn_on')) < start
+    assert c.index('video_turn_off = false;', c.index('video_status = is_video_turn_on')) < start
+    code += ('\nstatic int fixture_graphic_changed(bool video_turn_off=false,int legacy_status=0){int graphic_status=0;'+
+             tail.replace('is_graphic_changed()', 'legacy_status')+'return graphic_status;}\n'+TESTS)
     parts['graphics_policy'] = policy
     parts['graphics_stability'] = stable
     parts['graphics_cp_acceptance'] = cp_line
@@ -233,7 +252,8 @@ def main():
             'ignore-backend-epoch':('dv_gfx_stable.pending.epoch == dv_backend_generation() &&','true &&'),
             'ignore-runtime-failure':('dv_pending_new && !READ_ONCE(dv_new_runtime_failed);','dv_pending_new;'),
             'hardware-disable-forgets-desired':('static void dv_graphics_stability_disabled(void)\n{','static void dv_graphics_stability_disabled(void)\n{\n dv_graphics_stable=false;'),
-            'paused-retry-replaced-with-force':('if (dv_graphics_stability_changed())\n    ret |= 2;', 'if (dv_graphics_stability_changed())\n    force_set_lut = true;'),
+            'paused-retry-replaced-with-force':('if (!video_turn_off && dv_graphics_stability_changed())\n\t\tgraphic_status |= 2;', 'if (!video_turn_off && dv_graphics_stability_changed())\n\t\tforce_set_lut = true;'),
+            'video-off-retry-allowed':('!video_turn_off && dv_graphics_stability_changed()', 'dv_graphics_stability_changed()'),
             'paused-ineligible-loop':('amdv_graphics_request(READ_ONCE(dv_gfx_stable.eligible), &request);','amdv_graphics_request(true, &request);'),
             'probe-accepts-stable':('return (READ_ONCE(dv_graphics_stable) &&\n\t\tREAD_ONCE(dv_graphics_stable_available)) || READ_ONCE(dv_gfx_stable.engaged);','return false;'),
             'stable-accepts-probe':('if (busy)\n\t\t\treturn -EBUSY;', 'if (busy && false)\n\t\t\treturn -EBUSY;'),
