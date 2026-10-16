@@ -153,14 +153,16 @@ static int dv_new_zero_l1_min(char *md, int size)
 }
 
 /* Insert a 100-nit L2 trim when the metadata has none: no L2 for target 2081
- * and no CMv4.0 L8. Same values as Kodi's HDR10 static RPU (slope 1337, offset
- * 2016, power 1081, chroma/saturation/ms neutral); payload = 7 be16. It goes
+ * and no CMv4.0 L8. Same values as Kodi's HDR10 static RPU, the median 100-nit
+ * trim of graded titles (slope 1680, offset 2020, power 1475, chroma/saturation/
+ * ms neutral); payload = 7 be16. Kodi keeps such RPUs CMv2.9, as the newer
+ * library ignores L2 in CMv4.0. It goes
  * after the L1/L2 blocks to keep the levels in order. Idempotent (a repeated
  * frame reuses the buffer). Returns 1 added, 0 trim present, < 0 error. */
 static int dv_new_add_l2_trim(char *md, int *size)
 {
 	static const u8 l2[] = { 0, 0, 0, 14, 2,
-				 0x08, 0x21, 0x05, 0x39, 0x07, 0xe0, 0x04, 0x39,
+				 0x08, 0x21, 0x06, 0x90, 0x07, 0xe4, 0x05, 0xc3,
 				 0x08, 0x00, 0x08, 0x00, 0x08, 0x00 };
 	u8 *base = (u8 *)md, *p, *end, *ins = NULL;
 
