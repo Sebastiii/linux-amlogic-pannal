@@ -103,6 +103,11 @@ static bool xbmc_dv_new_src_black0;
  * per-scene peak, so Dolby DM otherwise tone-maps for the mastering display
  * while the DV grade of the same title states its real scene peak in L1. */
 static uint xbmc_dv_new_hdr10_meas_peak;
+/* DV (native or converted) to SDR on the newer library: when the metadata
+ * carries no 100-nit trim (no L2 for target 2081, no CMv4.0 L8), add the same
+ * static L2 trim as Kodi's HDR10 static RPU. Converted HDR10+ and RPUs made
+ * without a trim pass then render like HDR10; graded DV keeps its own trims. */
+static bool xbmc_dv_new_static_trim;
 /* The newer library does no display management for SDR output in video
  * priority (identity core1 tone curve, everything above 100 nits clips);
  * in graphics priority it tone-maps to the metadata like the 5.15 driver,
@@ -145,6 +150,8 @@ module_param(xbmc_dv_new_src_black0, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_src_black0, "Newer backend, to SDR: 0-nit source black for HDR10 (mastering min) and converted HDR10+ (L1 min)");
 module_param(xbmc_dv_new_hdr10_meas_peak, uint, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_hdr10_meas_peak, "Newer backend, HDR10 to SDR: measured source peak in nits from userspace (0 off, clamped 100..mastering)");
+module_param(xbmc_dv_new_static_trim, bool, 0664);
+MODULE_PARM_DESC(xbmc_dv_new_static_trim, "Newer backend, DV to SDR: add a static 100-nit L2 trim when the metadata has none");
 module_param(xbmc_dv_new_sdr_gpr, bool, 0664);
 MODULE_PARM_DESC(xbmc_dv_new_sdr_gpr, "Run the newer backend in graphics priority for SDR output");
 module_param(dv_new_backend_available, uint, 0444);
@@ -7219,6 +7226,16 @@ static int dv_parse_metadata_internal(struct vframe_s *vf,
 				if (debug_dolby & 4)
 					pr_info("DOLBY: src_black0 L1 min %d -> 0\n", old);
 			}
+		}
+
+		if (use_new && READ_ONCE(xbmc_dv_new_static_trim) &&
+		    (dst_format == FORMAT_SDR) && (src_format == FORMAT_DOVI)) {
+			int trim = dv_new_add_l2_trim(dv_new_md, &dv_new_md_size);
+
+			if (debug_dolby & 4)
+				pr_info("DOLBY: static trim %s (%d), md %d\n",
+					trim > 0 ? "added" : trim == 0 ? "present" : "error",
+					trim, dv_new_md_size);
 		}
 
 		flag = dv_run_control_path(use_new,
