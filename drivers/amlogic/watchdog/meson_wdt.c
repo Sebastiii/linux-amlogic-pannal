@@ -33,6 +33,7 @@
 #include <linux/reboot.h>
 #include <linux/clk.h>
 #include <linux/of_address.h>
+#include <linux/amlogic/watchdog.h>
 
 #undef pr_fmt
 #define pr_fmt(fmt)    "meson-watchdog: %s: " fmt, __func__
@@ -57,6 +58,44 @@ struct aml_wdt_dev {
 	struct notifier_block reboot_notifier;
 	bool is_running; /* 1:enable 0:disable */
 };
+
+/* Optional diagnostics; no feeding, reprogramming or late sleeping locks. */
+static bool reboot_trace;
+module_param(reboot_trace, bool, 0400);
+MODULE_PARM_DESC(reboot_trace, "Trace reboot stages and raw watchdog registers");
+
+/* of_iomap() is not unmapped by this legacy driver's remove path. Keep only
+ * that mapping here, never a pointer to devm-allocated device state.
+ */
+static void __iomem *reboot_trace_base;
+
+void aml_wdt_reboot_trace(const char *stage)
+{
+	void __iomem *base = READ_ONCE(reboot_trace_base);
+	u32 ctrl, tcnt;
+
+	if (!reboot_trace || !base)
+		return;
+	ctrl = readl(base + CTRL);
+	tcnt = readl(base + TCNT);
+	pr_emerg("reboot-watchdog v1 stage=%s ctrl=%08x enabled=%u tcnt=%08x limit=%u elapsed=%u\n",
+		 stage, ctrl, !!(ctrl & BIT(18)), tcnt,
+		 tcnt & 0xffff, tcnt >> 16);
+}
+
+static ssize_t reboot_watchdog_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct watchdog_device *wdog = dev_get_drvdata(dev);
+	struct aml_wdt_dev *wdev = watchdog_get_drvdata(wdog);
+	u32 ctrl = readl(wdev->reg_base + CTRL);
+	u32 tcnt = readl(wdev->reg_base + TCNT);
+
+	return scnprintf(buf, PAGE_SIZE,
+		"ctrl=%08x enabled=%u tcnt=%08x limit=%u elapsed=%u\n",
+		ctrl, !!(ctrl & BIT(18)), tcnt, tcnt & 0xffff, tcnt >> 16);
+}
+static DEVICE_ATTR_RO(reboot_watchdog);
 
 static void aml_update_bits(void __iomem  *reg, unsigned int mask,
 							unsigned int val)
@@ -292,6 +331,7 @@ static int aml_wtd_reboot_notify(struct notifier_block *nb,
 	struct aml_wdt_dev *wdev;
 
 	wdev = container_of(nb, struct aml_wdt_dev, reboot_notifier);
+	aml_wdt_reboot_trace("notifier-entry");
 	if (wdev->hrtimer_running) {
 		hrtimer_cancel(&wdev->timer);
 		wdev->hrtimer_running = false;
@@ -309,6 +349,7 @@ static int aml_wtd_reboot_notify(struct notifier_block *nb,
 		reset_watchdog(wdev);
 		/* Reboot owns the guard even if userspace previously stopped it. */
 		enable_watchdog(wdev);
+		aml_wdt_reboot_trace("notifier-armed");
 		dev_info(wdev->dev,
 			"reboot_notify: watchdog armed for reboot (%us)\n",
 			wdev->shutdown_timeout);
@@ -389,6 +430,12 @@ static int aml_wdt_probe(struct platform_device *pdev)
 	wdev->reboot_notifier = aml_wdt_reboot_notifier;
 	register_pm_notifier(&wdev->pm_notifier);
 	register_reboot_notifier(&wdev->reboot_notifier);
+	if (reboot_trace) {
+		WRITE_ONCE(reboot_trace_base, wdev->reg_base);
+		ret = device_create_file(&pdev->dev, &dev_attr_reboot_watchdog);
+		if (ret)
+			dev_warn(&pdev->dev, "watchdog trace attribute unavailable: %d\n", ret);
+	}
 	dev_info(wdev->dev, "AML Watchdog Timer probed done\n");
 #ifdef CONFIG_AMLOGIC_DEBUG_LOCKUP
 	g_awdt = wdev;
@@ -417,6 +464,8 @@ static int aml_wdt_remove(struct platform_device *pdev)
 {
 	struct watchdog_device *wdog = platform_get_drvdata(pdev);
 
+	device_remove_file(&pdev->dev, &dev_attr_reboot_watchdog);
+	WRITE_ONCE(reboot_trace_base, NULL);
 	aml_wdt_stop(wdog);
 	return 0;
 }

@@ -16,6 +16,7 @@
 #include <linux/syscalls.h>
 #include <linux/syscore_ops.h>
 #include <linux/uaccess.h>
+#include <linux/amlogic/watchdog.h>
 
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
@@ -67,10 +68,14 @@ EXPORT_SYMBOL_GPL(emergency_restart);
 
 void kernel_restart_prepare(char *cmd)
 {
+	aml_wdt_reboot_trace("kernel-restart-entry");
 	blocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);
+	aml_wdt_reboot_trace("notifiers-return");
 	system_state = SYSTEM_RESTART;
 	usermodehelper_disable();
+	aml_wdt_reboot_trace("device-shutdown-entry");
 	device_shutdown();
+	aml_wdt_reboot_trace("device-shutdown-return");
 }
 
 /**
@@ -215,7 +220,9 @@ void kernel_restart(char *cmd)
 {
 	kernel_restart_prepare(cmd);
 	migrate_to_reboot_cpu();
+	aml_wdt_reboot_trace("syscore-entry");
 	syscore_shutdown();
+	aml_wdt_reboot_trace("syscore-return");
 	if (!cmd)
 		pr_emerg("Restarting system\n");
 	else

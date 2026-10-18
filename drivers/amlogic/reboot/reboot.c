@@ -35,6 +35,7 @@
 #include <asm/compiler.h>
 #include <linux/kdebug.h>
 #include <linux/arm-smccc.h>
+#include <linux/amlogic/watchdog.h>
 
 static void __iomem *reboot_reason_vaddr;
 static u32 psci_function_id_restart;
@@ -107,9 +108,12 @@ void meson_common_restart(char mode, const char *cmd)
 {
 	u32 reboot_reason = parse_reason(cmd);
 
-	if (psci_function_id_restart)
+	if (psci_function_id_restart) {
+		aml_wdt_reboot_trace("reset-smc-entry");
 		meson_smc_restart((u64)psci_function_id_restart,
 						(u64)reboot_reason);
+		aml_wdt_reboot_trace("reset-smc-return");
+	}
 }
 
 static int __init need_ddr_window_test(char *__str)
