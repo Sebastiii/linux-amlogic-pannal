@@ -307,6 +307,8 @@ static int aml_wtd_reboot_notify(struct notifier_block *nb,
 		set_watchdog_cnt(wdev, wdev->shutdown_timeout *
 					wdev->one_second);
 		reset_watchdog(wdev);
+		/* Reboot owns the guard even if userspace previously stopped it. */
+		enable_watchdog(wdev);
 		dev_info(wdev->dev,
 			"reboot_notify: watchdog armed for reboot (%us)\n",
 			wdev->shutdown_timeout);
