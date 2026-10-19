@@ -197,12 +197,7 @@ int main(void) {test_registration();test_receipts();test_lifecycle();test_hdmi()
 def production(root):
     paths = {'tdm': 'sound/soc/amlogic/auge/tdm.c', 'state': 'sound/soc/amlogic/auge/tdm_hw.h', 'audio': 'drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_audio.c', 'hw': 'drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c', 'main': 'drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c', 'helper': 'drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_audio_layout.h', 'common': 'include/linux/amlogic/media/vout/hdmi_tx/hdmi_common.h', 'info': 'include/linux/amlogic/media/vout/hdmi_tx/hdmi_info_global.h', 'ext': 'include/linux/amlogic/media/vout/hdmi_tx/hdmi_tx_ext.h'}
     text = {key: (root / value).read_text() for key, value in paths.items()}
-    diagnostic_header = (root / 'include/linux/amlogic/media/sound/audio_diagnostics.h').read_text()
-    result = [PRELUDE, declaration(diagnostic_header, 'enum', 'aml_audio_diag_kind'), r'''
-static void aml_audio_diag_record(unsigned int kind,unsigned int id,unsigned int a,unsigned int b,unsigned int c) {
- (void)kind;(void)id;(void)a;(void)b;(void)c;
-}
-''']
+    result = [PRELUDE]
     for name in ['hdmi_audio_type', 'hdmi_audio_chnnum', 'hdmi_audio_fs', 'hdmi_audio_sampsize']:
         result.append(declaration(text['common'], 'enum', name))
     result += [declaration(text['info'], 'struct', 'hdmitx_audpara'), declaration(text['ext'], 'struct', 'aud_para'), declaration(text['state'], 'struct', 'aml_chmap')]

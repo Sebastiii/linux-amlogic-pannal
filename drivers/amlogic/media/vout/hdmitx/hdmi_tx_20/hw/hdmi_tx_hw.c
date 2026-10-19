@@ -15,7 +15,6 @@
  *
  */
 
-#include <linux/amlogic/media/sound/audio_diagnostics.h>
 #include <linux/version.h>
 #include <linux/module.h>
 #include "../hdmi_tx_hdr10_limits.h"
@@ -250,7 +249,6 @@ int hdmitx_hdcp_opr(unsigned int val)
 
 static void config_avmute(unsigned int val)
 {
-	aml_audio_diag_record(AAD_AVMUTE, 0, val, 0, 0);
 	pr_info(HW "avmute set to %d\n", val);
 	switch (val) {
 	case SET_AVMUTE:
@@ -661,7 +659,6 @@ static irqreturn_t intr_handler(int irq, void *dev)
 	unsigned int dat_dwc = hdmitx_rd_reg(HDMITX_DWC_HDCP22REG_STAT);
 	struct hdmitx_dev *hdev = (struct hdmitx_dev *)dev;
 
-	aml_audio_diag_record(AAD_HDMI_IRQ, irq, dat_top, dat_dwc, 0);
 	/* ack INTERNAL_INTR or else we stuck with no interrupts at all */
 	hdmitx_wr_reg(HDMITX_TOP_INTR_STAT_CLR, ~0);
 	hdmitx_wr_reg(HDMITX_DWC_HDCP22REG_STAT, 0xff);
@@ -2214,7 +2211,6 @@ void hdmitx_set_enc_hw(struct hdmitx_dev *hdev)
 
 static int hdmitx_set_dispmode(struct hdmitx_dev *hdev)
 {
-	aml_audio_diag_record(AAD_MODE, 0, hdev->cur_VIC, hdev->frac_rate_policy, 0);
 	if (hdev->cur_video_param == NULL) /* disable HDMI */
 		return 0;
 	if (!hdmitx_edid_VIC_support(hdev->cur_video_param->VIC))
@@ -2651,44 +2647,6 @@ static void set_aud_info_pkt(struct hdmitx_dev *hdev,
 	hdmitx_wr_reg(HDMITX_DWC_FC_AUDICONF3, 0);
 }
 
-/* Bounded passive G12 readback. The vendor get_msr_cts uses the same
- * CTS registers. Raw values/stability do not prove physical CTS or wire audio.
- * Caller holds setclk_mutex; no acknowledgement, reset or busy-wait here.
- */
-ssize_t aml_audio_diag_hw_show(char *buf)
-{
- struct hdmitx_dev *hdev = get_hdmitx_device();
- unsigned int n, ct[4], mode[4], i, fifo, mask, packet, gcp, clocks;
- bool stable;
- if (!aml_audio_diag_enabled() || !hdev || !READ_ONCE(hdev->ready))
-  return scnprintf(buf, PAGE_SIZE, "UNAVAILABLE inactive\n");
- if (hdev->chip_type != MESON_CPU_ID_G12A && hdev->chip_type != MESON_CPU_ID_G12B)
-  return scnprintf(buf, PAGE_SIZE, "UNAVAILABLE unsupported_soc\n");
- n = hdmitx_rd_reg(HDMITX_DWC_AUD_N1) |
-  (hdmitx_rd_reg(HDMITX_DWC_AUD_N2) << 8) |
-  ((hdmitx_rd_reg(HDMITX_DWC_AUD_N3) & 15) << 16);
- for (i = 0; i < 4; i++) {
-  ct[i] = hdmitx_rd_reg(HDMITX_DWC_AUD_CTS1) |
-   (hdmitx_rd_reg(HDMITX_DWC_AUD_CTS2) << 8);
-  mode[i] = hdmitx_rd_reg(HDMITX_DWC_AUD_CTS3);
-  ct[i] |= (mode[i] & 15) << 16;
- }
- stable = ct[0] == ct[1] && ct[1] == ct[2] && ct[2] == ct[3] &&
-  mode[0] == mode[1] && mode[1] == mode[2] && mode[2] == mode[3];
- /* Sticky status: no clear. Repeated high samples are not new events. */
- fifo = hdmitx_rd_reg(HDMITX_DWC_IH_AS_STAT0);
- mask = hdmitx_rd_reg(HDMITX_DWC_IH_MUTE_AS_STAT0);
- packet = hdmitx_rd_reg(HDMITX_DWC_FC_PACKET_TX_EN);
- gcp = hdmitx_rd_reg(HDMITX_DWC_FC_GCP);
- clocks = hdmitx_rd_reg(HDMITX_DWC_MC_CLKDIS);
- return scnprintf(buf, PAGE_SIZE,
-  "HW1 soc=%u ready_after=%u n=%u cts_raw=%u,%u,%u,%u cts3_raw=%u stable=%u fifo_latch_raw=%u fifo_mask_raw=%u packet=%u gcp=%u clkdis=%u acr_auto=%u inputclkfs=%u pll0=%u pll1=%u\n",
-  hdev->chip_type, READ_ONCE(hdev->ready), n, ct[0], ct[1], ct[2], ct[3], mode[3], stable,
-  fifo, mask, packet, gcp, clocks, hdmitx_rd_reg(HDMITX_DWC_FC_DATAUTO3),
-  hdmitx_rd_reg(HDMITX_DWC_AUD_INPUTCLKFS), hd_read_reg(P_HHI_HDMI_PLL_CNTL),
-  hd_read_reg(HHI_REG_ADDR(0xc9)));
-}
-
 static void set_aud_acr_pkt(struct hdmitx_dev *hdev,
 	struct hdmitx_audpara *audio_param)
 {
@@ -2714,11 +2672,6 @@ static void set_aud_acr_pkt(struct hdmitx_dev *hdev,
 		aud_n_para = hdmi_get_aud_n_paras(audio_param->sample_rate,
 			hdev->para->cd, char_rate);
 	pr_info(HW "aud_n_para = %d\n", aud_n_para);
-	aml_audio_diag_record(AAD_ACR, audio_param->sample_rate, aud_n_para, char_rate,
-		audio_param->type | (hdev->tx_aud_src << 16));
-	aml_audio_diag_record(AAD_ACR_POLICY, hdev->frac_rate_policy,
-		hdev->para->cs, hdev->para->cd,
-		hdev->para->cs == COLORSPACE_YUV422 ? COLORDEPTH_24B : hdev->para->cd);
 
 	/* ACR packet configuration */
 	data32 = 0;
@@ -2745,7 +2698,6 @@ static void set_aud_acr_pkt(struct hdmitx_dev *hdev,
 
 static void set_aud_fifo_rst(void)
 {
-	aml_audio_diag_record(AAD_FIFO_RESET, 0, 0, 0, 0);
 	/* reset audio fifo */
 	hdmitx_set_reg_bits(HDMITX_DWC_AUD_CONF0, 1, 7, 1);
 	hdmitx_set_reg_bits(HDMITX_DWC_AUD_CONF0, 0, 7, 1);
@@ -2810,7 +2762,6 @@ static void audio_mute_op(bool flag)
 	else
 		return;
 
-	aml_audio_diag_record(AAD_AMUTE, 0, flag, 0, 0);
 	if (flag == 0) {
 		hdmitx_set_reg_bits(HDMITX_TOP_CLK_CNTL, 0, 2, 2);
 		hdmitx_set_reg_bits(HDMITX_DWC_FC_PACKET_TX_EN, 0, 0, 1);
@@ -2834,7 +2785,6 @@ static int hdmitx_set_audmode(struct hdmitx_dev *hdev,
 		return 0;
 	if (!audio_param)
 		return 0;
-	aml_audio_diag_record(AAD_AUDIO_SETUP, audio_param->type, audio_param->sample_rate, audio_param->channel_num, audio_param->sample_size);
 	pr_info(HW "set audio\n");
 
 	memcpy(&hdmiaud_config_data,
@@ -2947,7 +2897,6 @@ static int hdmitx_set_audmode(struct hdmitx_dev *hdev,
 		pr_info(HW "enable ACR: [0x10e3] = 0x%x\n", data32);
 	}
 	hdmitx_set_reg_bits(HDMITX_DWC_FC_DATAUTO3, 1, 0, 1);
-	aml_audio_diag_record(AAD_AUDIO_DONE, audio_param->type, data32, hdev->tx_aud_src, 0);
 
 	return 1;
 }
@@ -3768,10 +3717,8 @@ static void hdcptx_events_handle(unsigned long arg)
 	}
 
 	hdcpobs3_2 = hdmitx_rd_reg(HDMITX_DWC_A_HDCPOBS3);
-	if (hdcpobs3_1 != hdcpobs3_2) {
+	if (hdcpobs3_1 != hdcpobs3_2)
 		hdcpobs3_1 = hdcpobs3_2;
-		aml_audio_diag_record(AAD_HDCP, 1, hdcpobs3_2, 0, 0);
-	}
 
 	bcaps_6_rp = !!(hdcpobs3_1 & (1 << 6));
 	bcaps_5_ksvfifoready = !!(hdcpobs3_1 & (1 << 5));
@@ -3792,7 +3739,6 @@ static void hdcptx_events_handle(unsigned long arg)
 
 	if (st_flag != hdmitx_rd_reg(HDMITX_DWC_A_APIINTSTAT)) {
 		st_flag = hdmitx_rd_reg(HDMITX_DWC_A_APIINTSTAT);
-		aml_audio_diag_record(AAD_HDCP, 2, st_flag, 0, 0);
 		pr_info("hdcp14: instat: 0x%x\n", st_flag);
 	}
 
@@ -4023,7 +3969,6 @@ static int hdmitx_cntl_ddc(struct hdmitx_dev *hdev, unsigned int cmd,
 			hdmitx_set_reg_bits(HDMITX_DWC_HDCP22REG_CTRL, 1, 2, 1);
 		break;
 	case DDC_HDCP_OP:
-		aml_audio_diag_record(AAD_HDCP, 0, argv, 0, 0);
 		hdev->hdcp_max_exceed_state = 0;
 		hdev->hdcp_max_exceed_cnt = 0;
 		ksv_sha_matched = 0;
@@ -4513,7 +4458,6 @@ static int hdmitx_cntl_misc(struct hdmitx_dev *hdev, unsigned int cmd,
 		}
 		break;
 	case MISC_AUDIO_RESET:
-		aml_audio_diag_record(AAD_AUDIO_RESET, 0, argv, 0, 0);
 		 /* bit3: i2s_rst bit4: spdif_rst */
 		hdmitx_wr_reg(HDMITX_DWC_MC_SWRSTZREQ, 0xe7);
 		hdmitx_set_reg_bits(HDMITX_DWC_AUD_SPDIF0, 1, 7, 1);
@@ -4606,7 +4550,6 @@ static void hdmi_phy_suspend(void)
 	unsigned int phy_cntl3;
 	unsigned int phy_cntl5;
 
-	aml_audio_diag_record(AAD_PHY, 0, 0, 0, 0);
 	switch (hdev->chip_type) {
 	case MESON_CPU_ID_SC2:
 		phy_cntl0 = P_ANACTRL_HDMIPHY_CTRL0;
@@ -4634,7 +4577,6 @@ static void hdmi_phy_suspend(void)
 
 static void hdmi_phy_wakeup(struct hdmitx_dev *hdev)
 {
-	aml_audio_diag_record(AAD_PHY, 0, 1, 0, 0);
 	hdmitx_set_phy(hdev);
 }
 
@@ -5046,10 +4988,8 @@ static void config_hdmi20_tx(enum hdmi_vic vic,
 	data32 |= (default_phase << 2);
 	data32 |= (0 << 1);
 	data32 |= (0 << 0);
-	if (!hdev->repeater_tx) {
-		aml_audio_diag_record(AAD_AVMUTE, 1, data32, 0, 0);
+	if (!hdev->repeater_tx)
 		hdmitx_wr_reg(HDMITX_DWC_FC_GCP, data32);
-	}
 
 	/* write AVI Infoframe packet configuration */
 	data32  = 0;

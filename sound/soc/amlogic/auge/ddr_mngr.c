@@ -18,7 +18,6 @@
 #undef pr_fmt
 #define pr_fmt(fmt) "audio_ddr_mngr: " fmt
 
-#include <linux/amlogic/media/sound/audio_diagnostics.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/init.h>
@@ -92,7 +91,6 @@ static struct frddr_attach attach_aed;
 static irqreturn_t aml_ddr_isr(int irq, void *devid)
 {
 	(void)devid;
-	aml_audio_diag_record(AAD_PRIMARY, irq, 0, 0, 0);
 	return IRQ_WAKE_THREAD;
 }
 
@@ -1417,14 +1415,10 @@ unsigned int aml_frddr_get_position(struct frddr *fr)
 {
 	struct aml_audio_controller *actrl = fr->actrl;
 	unsigned int reg_base = fr->reg_base;
-	unsigned int reg, position;
+	unsigned int reg;
 
 	reg = calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS2, reg_base);
-	position = aml_audiobus_read(actrl, reg);
-	if (aml_audio_diag_enabled())
-		aml_audio_diag_record(AAD_FRDDR_STATUS, fr->fifo_id,
-			aml_audiobus_read(actrl, calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS1, reg_base)), 0, 0);
-	return position;
+	return aml_audiobus_read(actrl, reg);
 }
 
 static bool aml_frddr_burst_finished(struct frddr *fr)

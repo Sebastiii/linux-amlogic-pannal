@@ -15,7 +15,6 @@
  *
  */
 
-#include <linux/amlogic/media/sound/audio_diagnostics.h>
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -5734,40 +5733,6 @@ static ssize_t show_hdmi_hsty_config(struct device *dev,
 
 static DEVICE_ATTR(disp_mode, 0664, show_disp_mode, store_disp_mode);
 static DEVICE_ATTR(attr, 0664, show_attr, store_attr);
-static ssize_t audio_diagnostic_show(struct device *dev,
- struct device_attribute *attr, char *buf)
-{
- return aml_audio_diag_show(buf);
-}
-
-static ssize_t audio_diagnostic_store(struct device *dev,
- struct device_attribute *attr, const char *buf, size_t count)
-{
- int ret = aml_audio_diag_control(buf);
- return ret ? ret : count;
-}
-
-static ssize_t audio_diagnostic_hw_show(struct device *dev,
- struct device_attribute *attr, char *buf)
-{
- ssize_t ret;
- if (!aml_audio_diag_enabled())
-  return scnprintf(buf, PAGE_SIZE, "UNAVAILABLE disabled_or_expired\n");
- if (!mutex_trylock(&setclk_mutex))
-  return scnprintf(buf, PAGE_SIZE, "UNAVAILABLE mode_busy\n");
- ret = aml_audio_diag_hw_show(buf);
- mutex_unlock(&setclk_mutex);
- return ret;
-}
-static ssize_t audio_diagnostic_events_show(struct device *dev,
- struct device_attribute *attr, char *buf)
-{
- return aml_audio_diag_events_show(buf);
-}
-static DEVICE_ATTR(audio_diagnostic_events, 0400, audio_diagnostic_events_show, NULL);
-static DEVICE_ATTR(audio_diagnostic, 0600, audio_diagnostic_show, audio_diagnostic_store);
-static DEVICE_ATTR(audio_diagnostic_hw, 0400, audio_diagnostic_hw_show, NULL);
-
 static DEVICE_ATTR(aud_mode, 0644, show_aud_mode, store_aud_mode);
 static DEVICE_ATTR(vid_mute, 0644, show_vid_mute, store_vid_mute);
 static DEVICE_ATTR(edid, 0644, show_edid, store_edid);
@@ -7293,9 +7258,6 @@ static int amhdmitx_probe(struct platform_device *pdev)
 		return r;
 	}
 	hdmitx_device.hdtx_dev = dev;
-	ret = device_create_file(dev, &dev_attr_audio_diagnostic);
-	ret = device_create_file(dev, &dev_attr_audio_diagnostic_hw);
-	ret = device_create_file(dev, &dev_attr_audio_diagnostic_events);
 	ret = device_create_file(dev, &dev_attr_disp_mode);
 	ret = device_create_file(dev, &dev_attr_attr);
 	ret = device_create_file(dev, &dev_attr_aud_mode);
@@ -7437,9 +7399,6 @@ static int amhdmitx_remove(struct platform_device *pdev)
 #endif
 
 	/* Remove the cdev */
-	device_remove_file(dev, &dev_attr_audio_diagnostic_events);
-	device_remove_file(dev, &dev_attr_audio_diagnostic_hw);
-	device_remove_file(dev, &dev_attr_audio_diagnostic);
 	device_remove_file(dev, &dev_attr_disp_mode);
 	device_remove_file(dev, &dev_attr_attr);
 	device_remove_file(dev, &dev_attr_aud_mode);
