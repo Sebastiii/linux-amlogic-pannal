@@ -96,7 +96,13 @@ int main(void) {
 import re
 flag = re.search(r'^#define DTS_HD_MA[^\n]*', header, re.M)
 assert flag
-program = flag[0] + '\n' + enums + prelude + helpers.declaration(header, 'struct', 'hdmi_audio_fs_ncts')
+diagnostic_header = (ROOT / 'include/linux/amlogic/media/sound/audio_diagnostics.h').read_text()
+diagnostic_stubs = helpers.declaration(diagnostic_header, 'enum', 'aml_audio_diag_kind') + r'''
+static void aml_audio_diag_record(unsigned int kind,unsigned int id,unsigned int a,unsigned int b,unsigned int c) {
+ (void)kind;(void)id;(void)a;(void)b;(void)c;
+}
+'''
+program = flag[0] + '\n' + enums + prelude + diagnostic_stubs + helpers.declaration(header, 'struct', 'hdmi_audio_fs_ncts')
 program += definitions + lookup + caller + main
 with tempfile.TemporaryDirectory() as temporary:
     source = Path(temporary) / 'acr.c'

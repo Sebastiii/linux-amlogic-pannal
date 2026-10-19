@@ -15,6 +15,7 @@
  *
  */
 #define DEBUG
+#include <linux/amlogic/media/sound/audio_diagnostics.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/platform_device.h>
@@ -757,8 +758,13 @@ static irqreturn_t aml_tdm_ddr_isr(int irq, void *devid)
 	struct device *dev = rtd->platform->dev;
 	struct aml_tdm *p_tdm = (struct aml_tdm *)dev_get_drvdata(dev);
 
-	if (!snd_pcm_running(substream))
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_THREAD, irq, p_tdm->id, substream->runtime->status->state, 0);
+	if (!snd_pcm_running(substream)) {
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			aml_audio_diag_record(AAD_THREAD_EXIT, irq, p_tdm->id, 1, 0);
 		return IRQ_HANDLED;
+	}
 
 	if ((substream->stream == SNDRV_PCM_STREAM_CAPTURE) &&
 	    p_tdm->chipinfo->reset_tdmin &&
@@ -768,6 +774,8 @@ static irqreturn_t aml_tdm_ddr_isr(int irq, void *devid)
 	}
 
 	snd_pcm_period_elapsed(substream);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_THREAD_EXIT, irq, p_tdm->id, 0, 0);
 
 	return IRQ_HANDLED;
 }
@@ -996,6 +1004,8 @@ static int aml_tdm_close(struct snd_pcm_substream *substream)
 
 	aml_dai_tdm_chmap_reset(substream);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_CLOSE, p_tdm->id, 0, 0, 0);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		aml_audio_unregister_frddr(p_tdm->dev,
 				substream);
 	else
@@ -1016,6 +1026,9 @@ static int aml_tdm_hw_params(struct snd_pcm_substream *substream,
 
 static int aml_tdm_hw_free(struct snd_pcm_substream *substream)
 {
+	struct aml_tdm *p_tdm = substream->runtime->private_data;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && p_tdm)
+		aml_audio_diag_record(AAD_FREE, p_tdm->id, 0, 0, 0);
 	aml_dai_tdm_chmap_reset(substream);
 	return snd_pcm_lib_free_pages(substream);
 }
@@ -1027,6 +1040,9 @@ static int aml_tdm_prepare(struct snd_pcm_substream *substream)
 	unsigned int start_addr, end_addr, int_addr;
 	unsigned int period, threshold;
 
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_PREPARE, p_tdm->id, runtime->rate,
+			runtime->period_size, runtime->buffer_size);
 	start_addr = runtime->dma_addr;
 	end_addr = start_addr + runtime->dma_bytes - FIFO_BURST;
 	period	 = frames_to_bytes(runtime, runtime->period_size);
@@ -1088,6 +1104,10 @@ static snd_pcm_uframes_t aml_tdm_pointer(struct snd_pcm_substream *substream)
 		addr = aml_toddr_get_position(p_tdm->tddr);
 
 	frames = bytes_to_frames(runtime, addr - start_addr);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_POINTER, p_tdm->id,
+			frames > runtime->buffer_size ? 0 : frames, runtime->buffer_size,
+			(frames > runtime->buffer_size ? 2 : 0) | snd_pcm_running(substream));
 	if (frames > runtime->buffer_size)
 		frames = 0;
 
@@ -1495,6 +1515,8 @@ static int aml_dai_tdm_trigger(struct snd_pcm_substream *substream, int cmd,
 	struct aml_tdm *p_tdm = snd_soc_dai_get_drvdata(cpu_dai);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		aml_audio_diag_record(AAD_TRIGGER, p_tdm->id, cmd, runtime->status->state, runtime->channels);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
