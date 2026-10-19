@@ -3798,7 +3798,7 @@ struct hdmi_audio_fs_ncts aud_44k1_para = {
 	},
 	.array[11] = {
 		.tmds_clk = 297000,
-		.n = 4707,
+		.n = 4704,
 		.cts = 247500,
 	},
 	.array[12] = {
